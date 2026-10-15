@@ -38,7 +38,7 @@ def calculate_nate(delta_woba_post_error: float, woba_baseline: float, li_k: flo
     if li_k <= 0:
         li_k = 1.0  # Prevent division by zero
         
-    nate_value = ((delta_woba_post_error - wOBA_baseline) / li_k) * (1.0 + dugout_momentum_factor)
+    nate_value = ((delta_woba_post_error - woba_baseline) / li_k) * (1.0 + dugout_momentum_factor)
     return round(nate_value, 4)
 
 def evaluate_alert(mei_value: float, nate_value: float = 0.0) -> str:
