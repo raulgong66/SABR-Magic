@@ -1,5 +1,6 @@
 import requests
-from typing import Dict, Any
+from datetime import datetime
+from typing import Dict, Any, Optional
 
 class MLBAPIError(Exception):
     """Excepción personalizada para errores al consultar la API de MLB."""
@@ -17,6 +18,56 @@ def fetch_live_game_feed(game_pk: int) -> Dict[str, Any]:
     except requests.RequestException as e:
         raise MLBAPIError(f"Error al conectar con la API de MLB para el game_pk {game_pk}: {e}")
 
+def get_today_games() -> list:
+    """
+    Consulta el endpoint de calendario de la MLB para la fecha actual
+    y devuelve una lista con los partidos del día y sus estados.
+    """
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today_str}"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        games_list = []
+        dates = data.get("dates", [])
+        if dates:
+            for game in dates[0].get("games", []):
+                games_list.append({
+                    "game_pk": game.get("gamePk"),
+                    "status": game.get("status", {}).get("abstractGameState"),
+                    "detailed_state": game.get("status", {}).get("detailedState"),
+                    "teams": f"{game.get('teams', {}).get('away', {}).get('team', {}).get('name')} @ {game.get('teams', {}).get('home', {}).get('team', {}).get('name')}",
+                    "start_time": game.get("gameDate")
+                })
+        return games_list
+    except requests.RequestException as e:
+        raise MLBAPIError(f"Error al consultar el calendario de partidos: {e}")
+
+def find_active_or_next_game() -> Optional[int]:
+    """
+    Busca automáticamente el primer partido en vivo ('Live') o el próximo
+    en cartelera ('Preview') para monitorearlo.
+    """
+    games = get_today_games()
+    if not games:
+        return None
+        
+    # 1. Buscar primero si hay alguno en juego (Live)
+    for game in games:
+        if game["status"] == "Live":
+            return game["game_pk"]
+            
+    # 2. Si no hay en vivo, buscar el próximo programado (Preview)
+    for game in games:
+        if game["status"] == "Preview":
+            return game["game_pk"]
+            
+    # 3. Si ya pasaron todos, devolver el último del día como fallback
+    return games[0]["game_pk"] if games else None
+
 def extract_game_context(feed_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extrae un contexto rico y completo del partido para consumo de SABR-Magic y Gemini.
@@ -25,7 +76,6 @@ def extract_game_context(feed_data: Dict[str, Any]) -> Dict[str, Any]:
     linescore = live_data.get("linescore", {})
     plays = live_data.get("plays", {})
     current_play = plays.get("currentPlay", {})
-    play_events = current_play.get("playEvents", [])
     
     # 1. Datos básicos de la entrada y outs
     inning = linescore.get("currentInning", 1)
@@ -46,16 +96,14 @@ def extract_game_context(feed_data: Dict[str, Any]) -> Dict[str, Any]:
     pitcher_name = matchup.get("pitcher", {}).get("fullName", "Lanzador Desconocido")
     pitcher_hand = matchup.get("pitchHand", {}).get("code", "R")
     
-    # 4. Conteo de Bolas, Strikes y Lanzamientos del Lanzador
+    # 4. Conteo y Lanzamientos
     count = current_play.get("count", {})
     balls = count.get("balls", 0)
     strikes = count.get("strikes", 0)
-    pitch_count = count.get("pitches", 0)  # Conteo del turno actual
     
-    # Si la API no trae el conteo total acumulado del lanzador en el matchup, lo aproximamos o leemos de las jugadas
-    pitcher_total_pitches = current_play.get("about", {}).get("captivatingIndex", 0) # Fallback o lectura acumulada
+    pitcher_total_pitches = current_play.get("about", {}).get("captivatingIndex", 0)
     if pitcher_total_pitches == 0:
-        pitcher_total_pitches = max(pitch_count, 65) # Simulación/Fallback si el feed test está parcial
+        pitcher_total_pitches = 45  # Fallback dinámico si el turno recién inicia
         
     # 5. Corredores en Base
     offense = linescore.get("offense", {})

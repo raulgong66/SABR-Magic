@@ -1,59 +1,100 @@
-from api_client import fetch_live_game_feed, extract_game_context
-from metrics_engine import calculate_mei, calculate_li, calculate_nate, evaluate_alert
-from typing import Dict, Any
+import urllib.request
+import json
 
-def analyze_live_game(game_pk: int) -> Dict[str, Any]:
+GAME_PK = "849810"
+
+def fetch_live_game_data(game_pk: str = GAME_PK) -> dict:
+    url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        with urllib.request.urlopen(req) as response:
+            return json.loads(response.read().decode())
+    except Exception as e:
+        print(f"❌ Error al consultar la MLB StatsAPI para el juego {game_pk}: {e}")
+        return {}
+
+def extract_play_context(play_data: dict, all_plays_history: list) -> dict:
     """
-    Orchestrates the SABR-Magic pipeline: fetches live MLB data, extracts context,
-    and computes both Allostatic Stress (MEI) and Next After the Error (NATE) in real time.
-    
-    Args:
-        game_pk (int): The unique game identifier from MLB Stats API.
-        
-    Returns:
-        dict: Comprehensive analysis report including game context, MEI, NATE, and alert status.
+    Extrae el contexto de una jugada real del juego 849810,
+    calculando con precisión los pitcheos acumulados del lanzador en el partido.
     """
-    # 1. Fetch raw data from MLB API
-    raw_feed = fetch_live_game_feed(game_pk)
+    about = play_data.get('about', {})
+    count = play_data.get('count', {})
+    matchup = play_data.get('matchup', {})
     
-    # 2. Extract situational context
-    context = extract_game_context(raw_feed)
+    inning = about.get('inning', 1)
+    inning_half = "Top" if about.get('isTopInning', True) else "Bottom"
+    outs = count.get('outs', 0)
     
-    pitch_count = context.get("pitch_count", 0)
-    inning = context.get("inning", 1)
-    outs = context.get("outs", 0)
-    runners_count = context.get("runners_count", 0)
+    pitcher_info = matchup.get('pitcher', {})
+    pitcher_name = pitcher_info.get('fullName', 'Desconocido')
+    pitcher_id = pitcher_info.get('id')
     
-    # 3. Compute Leverage Index (LI_k)
-    li_value = calculate_li(inning=inning, outs=outs, runners_count=runners_count)
+    batter_info = matchup.get('batter', {})
+    batter_name = batter_info.get('fullName', 'Desconocido')
     
-    # 4. Compute Allostatic Stress (MEI)
-    mei_value = calculate_mei(pitch_count)
-    
-    # 5. Compute NATE (Next After the Error)
-    # (Checking recent plays or feeding baseline parameters from feed state)
-    # Default baseline wOBA and delta, adjusted if error event is registered in current play frame
-    woba_baseline = 0.320
-    delta_woba_post_error = 0.350  # Default baseline tracking; updated dynamically if error occurs
-    dugout_momentum_factor = 0.05
-    
-    nate_value = calculate_nate(
-        delta_woba_post_error=delta_woba_post_error,
-        woba_baseline=woba_baseline,
-        li_k=li_value,
-        dugout_momentum_factor=dugout_momentum_factor
-    )
-    
-    # 6. Evaluate combined alert status (MEI + NATE synergy)
-    alert_status = evaluate_alert(mei_value=mei_value, nate_value=nate_value)
-    
+    balls = count.get('balls', 0)
+    strikes = count.get('strikes', 0)
+
+    # 🧮 CÁLCULO DE PITCHEOS ACUMULADOS EN EL JUEGO HASTA ESTE AT-BAT
+    accumulated_pitches = 0
+    if pitcher_id:
+        for p in all_plays_history:
+            p_matchup = p.get('matchup', {})
+            if p_matchup.get('pitcher', {}).get('id') == pitcher_id:
+                events = p.get('playEvents', [])
+                accumulated_pitches += len([e for e in events if e.get('isPitch', False)])
+                if p.get('atBatIndex') == play_data.get('atBatIndex'):
+                    break
+
+    runners = play_data.get('runners', [])
+    active_runners = [r for r in runners if r.get('end', {}).get('isOut') is False and r.get('end', {}).get('base') is not None]
+    runners_count = len(active_runners)
+    result_description = play_data.get('result', {}).get('description', 'En proceso...')
+
     return {
-        "game_pk": game_pk,
-        "context": context,
-        "metrics": {
-            "mei": mei_value,
-            "nate": nate_value,
-            "leverage_index": li_value,
-            "alert_status": alert_status
-        }
+        "at_bat_index": play_data.get('atBatIndex', 0),
+        "inning": inning,
+        "inning_half": inning_half,
+        "outs": outs,
+        "pitcher": {
+            "id": pitcher_id,
+            "name": pitcher_name,
+            "total_pitches": max(accumulated_pitches, 1)
+        },
+        "batter": {
+            "name": batter_name,
+            "count": f"{balls}-{strikes}"
+        },
+        "runners_count": runners_count,
+        "result": result_description
+    }
+
+def calculate_mei(pitcher_data: dict, game_context: dict) -> float:
+    total_pitches = pitcher_data.get("total_pitches", 1)
+    runners = game_context.get("runners_count", 0)
+    outs = game_context.get("outs", 0)
+    stress_base = (total_pitches / 15.0) + (runners * 0.8) - (outs * 0.2)
+    return round(max(stress_base, 0.5), 2)
+
+def calculate_nate(game_context: dict, metrics: dict) -> dict:
+    runners = game_context.get("runners_count", 0)
+    outs = game_context.get("outs", 0)
+    inning = game_context.get("inning", 1)
+    
+    li = 1.0 + (runners * 0.5) + (max(7 - inning, 0) * 0.1) - (outs * 0.15)
+    li = round(max(li, 0.5), 2)
+    nate = round(li * (metrics.get("mei", 1.0) * 0.5), 2)
+    
+    alert_status = "NORMAL"
+    if li > 2.0 or nate > 3.0:
+        alert_status = "¡ALERTA ROJA - ALTO APALANCAMIENTO!"
+    elif li > 1.5:
+        alert_status = "PRECAUCIÓN - SITUACIÓN CLAVE"
+
+    return {
+        "leverage_index": li,
+        "nate": nate,
+        "mei": metrics.get("mei", 1.0),
+        "alert_status": alert_status
     }

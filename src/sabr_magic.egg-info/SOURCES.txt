@@ -1,0 +1,8 @@
+README.md
+pyproject.toml
+src/sabr_magic.egg-info/PKG-INFO
+src/sabr_magic.egg-info/SOURCES.txt
+src/sabr_magic.egg-info/dependency_links.txt
+src/sabr_magic.egg-info/requires.txt
+src/sabr_magic.egg-info/top_level.txt
+tests/test_metrics.py
